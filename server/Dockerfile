@@ -35,6 +35,6 @@ RUN python3 -m pip install torch==2.3.0 torchvision==0.18.0 torchaudio==2.3.0 --
 RUN git clone https://github.com/KwaiVGI/LivePortrait.git && \
     cd LivePortrait && \
     python3 -m pip install -r requirements.txt && \
-    python3 -m pip install aioredis redis
+    python3 -m pip install aioredis redis cos-python-sdk-v5
 
 RUN python3 -m pip install --no-cache-dir onnxruntime-gpu==1.17.1 --extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple

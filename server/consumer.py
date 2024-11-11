@@ -13,8 +13,9 @@ from src.config.inference_config import InferenceConfig
 from src.config.crop_config import CropConfig
 from src.live_portrait_pipeline import LivePortraitPipeline
 
-OUTPUT_LOCAL_PATH = os.getenv("OUTPUT_LOCAL_PATH", "./tmp/outputs/")
+from cos_utils import init_cos_client, cos_download_file, cos_upload_file
 
+OUTPUT_LOCAL_PATH = os.getenv("OUTPUT_LOCAL_PATH", "./tmp/outputs/")
 
 # aioredis
 # redis
@@ -66,7 +67,7 @@ def init_live_portrait_pipeline():
     return live_portrait_pipeline
 
 
-def task_worker(
+async def task_worker(
     stream_name: str,
     consumer_group: str,
     consumer_name: str,
@@ -127,13 +128,22 @@ def task_worker(
                         # # if not res:
                         # #     raise RuntimeError(f"Error processing task {serving_task_id}")
                         # logger.info(f"Processing task {serving_task_id} with payload {task_payload}...")
+                        src_obj_key = task_payload.get("src_key")
+                        driving_obj_key = task_payload.get("driving_key")
+                        
+                        src_local_path = f'./sources/{src_obj_key}'
+                        driving_local_path = f'./drivings/{driving_obj_key}'
+                        
+                        await cos_download_file(src_obj_key, src_local_path)
+                        await cos_download_file(driving_obj_key, driving_local_path)
+                        
                         args = tyro.cli(ArgumentConfig)
-                        args.source = task_payload.get("src_key")
-                        args.driving = task_payload.get("driving_key")
+                        args.source = src_local_path
+                        args.driving = driving_local_path
                         args.output_dir = OUTPUT_LOCAL_PATH
                         wfp, wfp_concat = live_portrait_pipeline.execute(args)
-                        print(wfp, wfp_concat)
-                        live_portrait_engine
+                        print("uploading...")
+                        await cos_upload_file(wfp)
 
                     except Exception as e:
                         logger.error(f"{e}")
@@ -150,7 +160,7 @@ def task_worker(
 
         time.sleep(1.0)
 
-def run_worker(args):
+async def run_worker(args):
     
     global live_portrait_engine, r
     
@@ -170,11 +180,16 @@ def run_worker(args):
         else:
             raise e
         
+    logger.info("Initialized COS env...")
+    init_cos_client()
+    logger.info("COS env initialized")
+    
+        
     logger.info("Initializing LivePortrait engine...")
     live_portrait_engine = init_live_portrait_pipeline()
     logger.info("LivePortrait engine initialized")
     
-    task_worker(
+    await task_worker(
         stream_name=stream_name,
         consumer_group=consumer_group,
         consumer_name=CONSUMER_NAME,

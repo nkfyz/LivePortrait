@@ -1,6 +1,7 @@
 mapping = {
-        "src_key": "../assets/examples/source/s5.jpg",
-        "driving_key": "../assets/examples/driving/d13.mp4",
+        "request_id": "125",
+        "src_key": "test_live_portrait/s5.jpg",
+        "driving_key": "test_live_portrait/d13.mp4",
     }
 
 import requests, json
