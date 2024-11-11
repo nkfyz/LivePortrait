@@ -100,8 +100,8 @@ async def submit(req: LivePortraitRequestProto):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Proxy server for OpenSora serving")
-    parser.add_argument("--host", type=str, default="localhost")
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--host", type=str, default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=5000)
     parser.add_argument("--redis-host", type=str, default="43.156.39.249", help="Redis host")
     parser.add_argument("--redis-port", type=int, default=31317, help="Redis port")
     return parser.parse_args()

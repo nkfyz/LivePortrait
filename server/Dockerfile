@@ -1,6 +1,4 @@
 ARG CUDA_VERSION=12.4.1
-# **NOTE**: For 4090, change to 12.1.0
-#   For H100, change to 12.4.1
 
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04
 
@@ -36,6 +34,7 @@ RUN python3 -m pip install torch==2.3.0 torchvision==0.18.0 torchaudio==2.3.0 --
 
 RUN git clone https://github.com/KwaiVGI/LivePortrait.git && \
     cd LivePortrait && \
-    python3 -m pip install -r requirements.txt
+    python3 -m pip install -r requirements.txt && \
+    python3 -m pip install aioredis redis
 
 RUN python3 -m pip install --no-cache-dir onnxruntime-gpu==1.17.1 --extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple
