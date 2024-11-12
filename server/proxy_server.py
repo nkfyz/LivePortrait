@@ -5,26 +5,25 @@ from fastapi.security import APIKeyHeader
 from fastapi import FastAPI, Depends
 from typing import Optional, Tuple
 import aioredis
+import logging
+import uuid
 
 import uvicorn
 
 from pydantic import BaseModel, Field, root_validator
 from starlette.responses import JSONResponse
 
+header_scheme = APIKeyHeader(name="X-API-Key")
+SERVING_API_KEY = os.getenv("SERVING_API_KEY", "oLjQD5hWDYN5DeAQ4cx5CL3vJYOTXf0c")
 TASK_PREFIX = "lp-task-"  # Prefix for task keys, used for retrieving data/status
 TASK_TAG = "lp"
 STREAM_NAME_PREFIX = os.getenv("REDIS_STREAM_PREFIX", "task_stream") + "_"
 CONSUMER_GROUP_PREFIX = os.getenv("REDIS_GROUP_PREFIX", "task_group") + "_"
 TASK_STATUS_EXPIRE = int(os.getenv("TASK_STATUS_EXPIRE", 43200))  # 12 hours by default
 
-
-import logging
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-
-r = None
 
 async def _init_consumer_group(stream_name: str, group_name: str):
     try:
@@ -47,47 +46,65 @@ async def lifespan(app: FastAPI):
     logger.info("Redis connection closed")
     logger.info("Proxy server shut down")
     
+    
 app = FastAPI(lifespan=lifespan)
 
 
 class LivePortraitRequestProto(BaseModel):
     '''Define the request schema for the Live Portrait API.
-    Live Portrait needs two inputs to generate the final output:
-    1. The source image/video (src_key or src_local_path)
-    2. The driving image/video (driving_key or driving_local_path)
+    Live Portrait needs two inputs to generate the final output: source and driving.
     This server will process source input according to the driving input.
     Some characteristics of the driving input will be transferred and applied to the source input.
     '''
-    request_id: str = Field('test_request_id_0', description="Unique request ID", min_length=1)
+    request_id: str = Field(default_factory=lambda: str(uuid.uuid1()), description="uuid for the request")
     src_key: Optional[str] = Field(None, description="Object key of the source image/video from COS", min_length=1)
     driving_key: Optional[str] = Field(None, description="Object key of the driving image/video from COS", min_length=1)
+    status: Optional[str] = Field("Init", description="Status of the request", min_length=1)
 
     @root_validator(pre=True)
     def check_either_image_key_or_local_path(cls, values):
         src_key = values.get("src_key")
         driving_key = values.get("driving_key")
         if not src_key or not driving_key:
-            raise ValueError("The 'src_key' and 'driving_key' must be provided")
+            raise ValueError("The 'src_key' and 'driving_key' must be both provided")
         return values
     
 
+@app.get("/status/{request_id}")
+async def status(request_id: str, api_key: str = Depends(header_scheme)):
+    if api_key != SERVING_API_KEY:
+        return JSONResponse({"detail": "Invalid API key"}, status_code=401)
+    
+    task_name = TASK_PREFIX + request_id
+    task_data = await r.hgetall(task_name)
+    if not task_data:
+        return JSONResponse({"detail": f"Task {request_id} not found"}, status_code=404)
+    else:
+        task_status = {"request_id": request_id, "status": task_data.get("status", "unknown"), "uploaded_url": task_data.get("uploaded_url", "N/A")}
+        return JSONResponse(content=task_status)
+
+
 @app.post("/submit")
-async def submit(req: LivePortraitRequestProto):
+async def submit(req: LivePortraitRequestProto, api_key: str = Depends(header_scheme)):
+    if api_key != SERVING_API_KEY:
+        return JSONResponse({"detail": "Invalid API key"}, status_code=401)
+    
     mapping = {
         "src_key": req.src_key,
         "driving_key": req.driving_key,
+        "status": "submitted",
     }
-
-    # Task data/status must be set first before adding to the queue
+    
+    print(mapping)
+    
     task_name = TASK_PREFIX + req.request_id
     
-    logger.info(f"Recving task {task_name} with payload {mapping}")
+    logger.info(f"Recving task {task_name} with {mapping}")
     
     n = await r.hset(task_name, mapping=mapping)
     await r.expire(task_name, TASK_STATUS_EXPIRE)
     logger.info(f"{n} fields successfully added for {task_name} (expire in {TASK_STATUS_EXPIRE} secs)")
 
-    # Example: task_stream_lp
     queue_name = STREAM_NAME_PREFIX + TASK_TAG
     redis_task_id = await r.xadd(queue_name, {"request_id": req.request_id})
     logger.info(f"Redis task {redis_task_id} added to Redis Stream {queue_name}")

@@ -4,7 +4,10 @@ import redis
 import os
 import time
 import sys
+import tyro
+import logging
 
+# Before importing the LivePortraitPipeline, we need to add the parent directory to the sys.path
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, parent_dir)
 
@@ -15,15 +18,6 @@ from src.live_portrait_pipeline import LivePortraitPipeline
 
 from cos_utils import init_cos_client, cos_download_file, cos_upload_file
 
-OUTPUT_LOCAL_PATH = os.getenv("OUTPUT_LOCAL_PATH", "./tmp/outputs/")
-
-# aioredis
-# redis
-
-
-import tyro
-
-import logging
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -37,8 +31,7 @@ CONSUMER_GROUP_PREFIX = os.getenv("REDIS_GROUP_PREFIX", "task_group") + "_"
 LOCK_KEY_PREFIX = os.getenv("LOCK_KEY_PREFIX", "lock_key") + "_" + TASK_TAG
 CONSUMER_NAME = os.getenv("HOSTNAME", "test_consumer_lp")
 
-live_portrait_engine = None
-r = None
+OUTPUT_LOCAL_PATH = os.getenv("OUTPUT_LOCAL_PATH", "./tmp/outputs/")
 
 def parse_args():
     parser = argparse.ArgumentParser(description="LivePortrait Redis Task Worker")
@@ -52,9 +45,6 @@ def partial_fields(target_class, kwargs):
 
 
 def init_live_portrait_pipeline():
-    # fast_check_args(args)
-
-    # specify configs for inference
     inference_cfg = partial_fields(InferenceConfig, args.__dict__)
     crop_cfg = partial_fields(CropConfig, args.__dict__)
 
@@ -63,7 +53,6 @@ def init_live_portrait_pipeline():
         inference_cfg=inference_cfg,
         crop_cfg=crop_cfg
     )
-    
     return live_portrait_pipeline
 
 
@@ -113,6 +102,7 @@ async def task_worker(
                                     f"Task {serving_task_id} is already being processed by another consumer: {occupied_by_pod}. Skipping..."
                                 )
                                 continue
+                            
                         # NOTE Important: mark the task as occupied by the current consumer
                         r.hmset(task_prefix + serving_task_id, {"occupied_by_pod": consumer_name})
                         logger.info(f"Set task {serving_task_id} as occupied by {consumer_name}")
@@ -122,18 +112,12 @@ async def task_worker(
                         if not task_payload:
                             raise RuntimeError(f"Task payload of {serving_task_id} not found")
 
-                        # # decoded_data = {key.decode('utf-8'): value.decode('utf-8') for key, value in task_payload.items()}
-                        # task_payload = task_payload.get("payload")  # actual payload from the request
-                        # # res = await process_task(task_payload)
-                        # # if not res:
-                        # #     raise RuntimeError(f"Error processing task {serving_task_id}")
-                        # logger.info(f"Processing task {serving_task_id} with payload {task_payload}...")
                         src_obj_key = task_payload.get("src_key")
                         driving_obj_key = task_payload.get("driving_key")
-                        
                         src_local_path = f'./sources/{src_obj_key}'
                         driving_local_path = f'./drivings/{driving_obj_key}'
                         
+                        logger.info(f"Downloading files from COS: {src_obj_key}, {driving_obj_key}")
                         await cos_download_file(src_obj_key, src_local_path)
                         await cos_download_file(driving_obj_key, driving_local_path)
                         
@@ -141,12 +125,22 @@ async def task_worker(
                         args.source = src_local_path
                         args.driving = driving_local_path
                         args.output_dir = OUTPUT_LOCAL_PATH
+                        
+                        logger.info(f"Processing task {serving_task_id}")
+                        r.hmset(task_prefix + serving_task_id, {"status": 'processing', "uploaded_url": ''})
                         wfp, wfp_concat = live_portrait_pipeline.execute(args)
-                        print("uploading...")
-                        await cos_upload_file(wfp)
+                        
+                        logger.info(f"Task {serving_task_id} processed successfully, uploading results to COS")
+                        url = await cos_upload_file(task_id=serving_task_id, local_path=wfp, non_blocking=False)
+                        if url is not None:
+                            r.hmset(task_prefix + serving_task_id, {"status": 'finish', "uploaded_url": url})
+                        else:
+                            r.hmset(task_prefix + serving_task_id, {"status": 'error', "uploaded_url": ''})
+                            logger.error(f"Failed to upload the result to COS")
 
                     except Exception as e:
                         logger.error(f"{e}")
+                        r.hmset(task_prefix + serving_task_id, {"status": 'error', "uploaded_url": ''})
                         # Callback with failed status
                     finally:
                         # NOTE: messages are always acknowledged and deleted after the task finished or failed;
@@ -159,6 +153,7 @@ async def task_worker(
                             logger.info(f"Released lock {lock_key} by consumer {consumer_name}")
 
         time.sleep(1.0)
+
 
 async def run_worker(args):
     
@@ -184,7 +179,6 @@ async def run_worker(args):
     init_cos_client()
     logger.info("COS env initialized")
     
-        
     logger.info("Initializing LivePortrait engine...")
     live_portrait_engine = init_live_portrait_pipeline()
     logger.info("LivePortrait engine initialized")
